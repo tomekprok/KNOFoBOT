@@ -1,10 +1,8 @@
 1. Wrzucić w całości na platformę
     1a. Płytka ze źródłem zasilania
-    1b. Ustalić piny na schemacie do końca (analogue czy digital do Trig sensorów ultradźwiękowych oraz do enable silników)
-    1c. Wiring jak ze schematu + ustalić schemat do końca
+    1c. Zapiąć kabelki jak ze schematu
 
 2. Zaprogramować algorytm samodzielnego jeżdżenia
-    2a. Refaktor kodu - struktury na silnik, funkcje niezależne od tego czy lewy czy prawy silnik
     2b. Napisać kod, który bierze dwa sensory i przetestować czy robot odpowiednio reaguje
     2c. Napisać jakiś podstawowy algorytm 
 
