@@ -1,139 +1,115 @@
 #include <pins.h>
 
-void set_pin_modes() {
-  pinMode(silnikLewy_PWM, OUTPUT);
-  pinMode(silnikPrawy_PWM, OUTPUT);
+void set_pin_modes()
+{
+  pinMode(pins.leftEngPWM, OUTPUT);
+  pinMode(pins.rightEngPWM, OUTPUT);
 
-  pinMode(silnikLewy_PRZOD, OUTPUT);
-  pinMode(silnikLewy_TYL, OUTPUT);
+  pinMode(pins.leftEngFwd, OUTPUT);
+  pinMode(pins.leftEngBack, OUTPUT);
 
-  pinMode(silnikPrawy_PRZOD, OUTPUT);
-  pinMode(silnikPrawy_TYL, OUTPUT);
+  pinMode(pins.rightEngFwd, OUTPUT);
+  pinMode(pins.rightEndBack, OUTPUT);
 
-  pinMode(sensorNadajnik, OUTPUT);
-  pinMode(sensorOdbiornik, INPUT);
+  pinMode(pins.sensorTrig, OUTPUT);
+  pinMode(pins.sensorEcho, INPUT);
 }
 
+typedef struct
+{
+  const int pin_przod, pin_tyl;
+  const int pin_pwm;
+} silnik;
 
-void stopEng() {
-  analogWrite(silnikLewy_PWM, 0);
-  analogWrite(silnikPrawy_PWM, 0);
+void stopEng(const silnik &s)
+{
+  // czy moze nie warto hamowac ustawiajac oba przod/tyl na wysoki i pwm na wysoki (fast stop w tabeli prawdy) ->
+  //  -> do testów na stole, co warto ustawić na te dwa piny
+  analogWrite(s.pin_pwm, 0);
 
-  digitalWrite(silnikLewy_PRZOD, LOW);
-  digitalWrite(silnikLewy_TYL, LOW);
-
-  digitalWrite(silnikPrawy_PRZOD, LOW);
-  digitalWrite(silnikPrawy_TYL, LOW);
+  digitalWrite(s.pin_przod, HIGH);
+  digitalWrite(s.pin_tyl, HIGH);
 }
 
-
-void setup() {
-  Serial.begin(9600);
-
-  set_pin_modes();
-  stopEng();
-}
-
-
-int PowerForPWM(int moc) {
+int PowerForPWM(float moc)
+{
   moc = constrain(moc, 0, 100);
   int pwm = map(moc, 0, 100, 0, PWM_MAX);
 
   return pwm;
 }
 
-
-void LeftEngForward(int moc) {
+void set_eng_forward(const silnik &s, float moc)
+{
   int pwm = PowerForPWM(moc);
 
-  digitalWrite(silnikLewy_PRZOD, HIGH);
-  digitalWrite(silnikLewy_TYL, LOW);
+  digitalWrite(s.pin_przod, HIGH);
+  digitalWrite(s.pin_tyl, LOW);
 
-  analogWrite(silnikLewy_PWM, pwm);
+  analogWrite(s.pin_pwm, pwm);
 }
 
-
-void RightEngForward(int moc) {
+void set_eng_backward(const silnik &s, float moc)
+{
   int pwm = PowerForPWM(moc);
 
-  digitalWrite(silnikPrawy_PRZOD, HIGH);
-  digitalWrite(silnikPrawy_TYL, LOW);
+  digitalWrite(s.pin_przod, LOW);
+  digitalWrite(s.pin_tyl, HIGH);
 
-  analogWrite(silnikPrawy_PWM, pwm);
+  analogWrite(s.pin_pwm, pwm);
 }
 
-
-void BothEngForward(int moc) {
-  RightEngForward(moc);
-  LeftEngForward(moc);
-}
-
-
-void LeftEngBackward(int moc) {
-  int pwm = PowerForPWM(moc);
-
-  digitalWrite(silnikLewy_PRZOD, LOW);
-  digitalWrite(silnikLewy_TYL, HIGH);
-
-  analogWrite(silnikLewy_PWM, pwm);
-}
-
-
-void RightEngBackward(int moc) {
-  int pwm = PowerForPWM(moc);
-
-  digitalWrite(silnikPrawy_PRZOD, LOW);
-  digitalWrite(silnikPrawy_TYL, HIGH);
-
-  analogWrite(silnikPrawy_PWM, pwm);
-}
-
-
-void TurnLeft(int moc) {
-  LeftEngBackward(moc);
-  RightEngForward(moc);
-}
-
-
-void TurnRight(int moc) {
-  LeftEngForward(moc);
-  RightEngBackward(moc);
-}
-
-
-int zmierzOdleglosc() {
+int zmierzOdleglosc()
+{
   long czasTrwaniaSygnalu;
   int odleglosc;
 
-  digitalWrite(sensorNadajnik, LOW);
+  digitalWrite(pins.sensorTrig, LOW);
   delayMicroseconds(2);
 
-  digitalWrite(sensorNadajnik, HIGH);
+  digitalWrite(pins.sensorTrig, HIGH);
   delayMicroseconds(10);
 
-  digitalWrite(sensorNadajnik, LOW);
+  digitalWrite(pins.sensorTrig, LOW);
 
-  czasTrwaniaSygnalu = pulseIn(sensorOdbiornik, HIGH);
-  odleglosc = czasTrwaniaSygnalu / 58;
+  czasTrwaniaSygnalu = pulseIn(pins.sensorEcho, HIGH);
+  odleglosc = czasTrwaniaSygnalu / 58; // magic number?
 
   return odleglosc;
 }
 
+void setup()
+{
+  Serial.begin(9600);
 
-void loop() {
+  set_pin_modes();
+  silnik s_lewy = {pins.leftEngFwd, pins.leftEngBack, pins.leftEngPWM};
+  silnik s_prawy = {pins.rightEngFwd, pins.leftEngBack, pins.rightEngPWM};
+  stopEng(s_lewy);
+  stopEng(s_prawy);
+}
+
+void loop()
+{
   int odleglosc = zmierzOdleglosc();
 
   Serial.print(odleglosc);
   Serial.println(" cm");
 
-  if (odleglosc >= 3 && odleglosc <= 5) {
-    BothEngForward(60);
+  if (odleglosc >= 3 && odleglosc <= 5)
+  {
+    set_eng_forward(s_lewy, 60);
+    set_eng_forward(s_prawy, 60);
   }
-  else if (odleglosc > 5) {
-    TurnLeft(60);
+  else if (odleglosc > 5)
+  {
+    set_eng_backward(s_lewy, 60);
+    set_eng_forward(s_prawy, 60);
   }
-  else {
-    TurnRight(60);
+  else
+  {
+    set_eng_forward(s_lewy, 60);
+    set_eng_backward(s_prawy, 60);
   }
 
   delay(100);
