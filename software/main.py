@@ -12,16 +12,18 @@ i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=10000)
 # XSHUT sensorów
 xshut_left = Pin(12, Pin.OUT)
 xshut_right = Pin(13, Pin.OUT)
+xshut_front = Pin(11, Pin.OUT)
 
 DEFAULT = 0x29
 ADDR_LEFT = 0x30
 ADDR_RIGHT = 0x31
+ADDR_FRONT = DEFAULT
 
 # 100 mm = 10 cm
 THRESHOLD_MM = 100
 
 # Prędkości silników: zakres 0-65535
-FORWARD_SPEED = 35000
+FORWARD_SPEED = 50000
 TURN_SPEED = 35000
 
 # =========================
@@ -63,11 +65,11 @@ def stop():
     in4.value(0)
 
 def set_forward():
-    in1.value(0)
-    in2.value(1)
+    in1.value(1)
+    in2.value(0)
 
-    in3.value(0)
-    in4.value(1)
+    in3.value(1)
+    in4.value(0)
 
 def forward(speed=FORWARD_SPEED):
     set_forward()
@@ -157,7 +159,8 @@ def init_sensors():
     if ADDR_LEFT not in scan():
         stop()
         raise SystemExit
-
+    print("left succ init")
+    
     xshut_right.value(1)
     sleep(1)
 
@@ -168,21 +171,39 @@ def init_sensors():
 
     change_address(DEFAULT, ADDR_RIGHT)
     sleep(0.5)
-
+    print("right succ init")
+    
+    xshut_front.value(1)
+    sleep(0.5)
+    
     devices = scan()
-    if ADDR_LEFT not in devices or ADDR_RIGHT not in devices:
+    print(devices, ADDR_LEFT, ADDR_FRONT, ADDR_RIGHT)
+    if ADDR_LEFT not in devices or ADDR_RIGHT not in devices or DEFAULT not in devices:
         stop()
         raise SystemExit
+    
+    change_address(DEFAULT, ADDR_FRONT)
+    sleep(1)
+    
+    print("front succ init")
+    
+    devices = scan()
+    if ADDR_LEFT not in devices or ADDR_RIGHT not in devices or ADDR_FRONT not in devices:
+        stop()
+        raise SystemExit
+    print("all succ init")
+      
+    RR_sensor = VL53L0X(i2c, ADDR_LEFT)
+    forward_sensor = VL53L0X(i2c, ADDR_RIGHT)
+    RF_sensor = VL53L0X(i2c, ADDR_FRONT)
 
-    left_sensor = VL53L0X(i2c, ADDR_LEFT)
-    right_sensor = VL53L0X(i2c, ADDR_RIGHT)
-
-    set_sensor_address(left_sensor, ADDR_LEFT)
-    set_sensor_address(right_sensor, ADDR_RIGHT)
+    set_sensor_address(RF_sensor, ADDR_FRONT)
+    set_sensor_address(RR_sensor, ADDR_LEFT)
+    set_sensor_address(forward_sensor, ADDR_RIGHT)
 
     sleep(1)
 
-    return left_sensor, right_sensor
+    return RR_sensor, forward_sensor, RF_sensor
 
 
 # =========================
@@ -192,29 +213,34 @@ def init_sensors():
 stop()
 set_forward()
 
-left_sensor, right_sensor = init_sensors()
+RR_sensor, forward_sensor, RF_sensor = init_sensors()
 from collections import deque
 
-N_dist_avg = 5
-left_dists = deque([], N_dist_avg)
-right_dists = deque([], N_dist_avg)
+#N_dist_avg = 5
+#RR_dists = deque([], N_dist_avg)
+#forward_dists = deque([], N_dist_avg)
+#RF_dists = deque([], N_dist_avg)
 
 while True:
     try:
-        left_distance = left_sensor.read()
-        left_dists.append(left_distance)
+        RR_distance = RR_sensor.read()
+        #RR_dists.append(RR_distance)
         #sleep(0.15)
 
-        right_distance = right_sensor.read()
-        right_dists.append(right_distance)
+        forward_disantce = forward_sensor.read()
+        #forward_dists.append(forward_disantce)
         #sleep(0.15)
-        #print(sum(left_dists)/N_dist_avg, sum(right_dists)/N_dist_avg)
+        #print(sum(RR_dists)/N_dist_avg, sum(forward_dists)/N_dist_avg)
         
-        front_distance = left_distance
-        side_distance = right_distance
+        RF_distance = RF_sensor.read()
+        #RF_dists.append(RF_distance)
         
-        P_sum = sum_power_func(front_distance)
-        P_diff = diff_power_func(side_distance)
+        print(RR_distance, forward_disantce, RF_distance)
+        
+        right_distance = min(RR_distance, RF_distance)
+        
+        P_sum = sum_power_func(forward_disantce)
+        P_diff = diff_power_func(right_distance)
         
         P_L = (P_sum - P_diff)/2
         P_R = (P_sum + P_diff)/2
@@ -222,8 +248,8 @@ while True:
         
         set_speed_fraction(P_L, P_R)
         
-        #left_blocked = left_distance < THRESHOLD_MM
-        #right_blocked = right_distance < THRESHOLD_MM
+        #left_blocked = RR_distance < THRESHOLD_MM
+        #right_blocked = forward_disantce < THRESHOLD_MM
         #if right_blocked and not left_blocked:
         #    turn_left()
 
@@ -246,3 +272,4 @@ while True:
     except KeyboardInterrupt:
         stop()
         break
+
