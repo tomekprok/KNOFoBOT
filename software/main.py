@@ -17,14 +17,14 @@ xshut_front = Pin(11, Pin.OUT)
 DEFAULT = 0x29
 ADDR_LEFT = 0x30
 ADDR_RIGHT = 0x31
-ADDR_FRONT = DEFAULT
+ADDR_FRONT = 0x32
 
 # 100 mm = 10 cm
 THRESHOLD_MM = 100
 
 # Prędkości silników: zakres 0-65535
+PWM_MAX = 65535
 FORWARD_SPEED = 50000
-TURN_SPEED = 35000
 
 # =========================
 # L298N — SILNIKI
@@ -51,8 +51,8 @@ def set_speed(left_speed, right_speed):
 def set_speed_fraction(left_speed_frac, right_speed_frac):
     ls = int(FORWARD_SPEED*left_speed_frac)
     rs = int(FORWARD_SPEED*right_speed_frac)
-    ls = max(0, ls)
-    rs = max(0, rs)
+    ls = max(0, min(ls, PWM_MAX))
+    rs = max(0, min(rs, PWM_MAX))
     set_speed(ls,rs)
 
 
@@ -71,48 +71,38 @@ def set_forward():
     in3.value(1)
     in4.value(0)
 
-def forward(speed=FORWARD_SPEED):
-    set_forward()
-    set_speed(speed, speed)
-
-
-def backward(speed=FORWARD_SPEED):
+def set_backward():
     in1.value(0)
     in2.value(1)
 
     in3.value(0)
     in4.value(1)
 
-    set_speed(speed, speed)
 
-
-def turn_left(speed=TURN_SPEED):
+def set_left():
     in1.value(0)
     in2.value(1)
 
     in3.value(1)
     in4.value(0)
 
-    set_speed(speed, speed)
-
-
-def turn_right(speed=TURN_SPEED):
+def set_right():
     in1.value(1)
     in2.value(0)
 
     in3.value(0)
     in4.value(1)
 
-    set_speed(speed, speed)
-
 MAX_FRONT_DIST = 300
 MIN_FRONT_DIST = 60
 SIDE_DIST_OPT = 150
+MAX_SIDE_DIST = 150
+MIN_SIDE_DIST = 70
 SCALING_SIDE = 0.01
 
 def sum_power_func(front_dist):
     P = (front_dist - 60) * 2/240
-    P = min(P,2)
+    P = min(P,1)
     P = max(0,P)
     return P
 
@@ -149,7 +139,7 @@ def init_sensors():
     xshut_left.value(0)
     xshut_right.value(0)
     sleep(1)
-
+    
     xshut_left.value(1)
     sleep(1)
 
@@ -176,21 +166,19 @@ def init_sensors():
     xshut_front.value(1)
     sleep(0.5)
     
+    #devices = scan()
+    #if ADDR_LEFT not in devices or ADDR_RIGHT not in devices or DEFAULT not in devices:
+    #    
     devices = scan()
-    print(devices, ADDR_LEFT, ADDR_FRONT, ADDR_RIGHT)
-    if ADDR_LEFT not in devices or ADDR_RIGHT not in devices or DEFAULT not in devices:
+    print(devices)
+    if ADDR_FRONT not in devices and DEFAULT in devices:
+        change_address(DEFAULT, ADDR_FRONT)
+    
+    if ADDR_FRONT not in devices and DEFAULT in devices:
         stop()
         raise SystemExit
     
-    change_address(DEFAULT, ADDR_FRONT)
-    sleep(1)
-    
-    print("front succ init")
-    
-    devices = scan()
-    if ADDR_LEFT not in devices or ADDR_RIGHT not in devices or ADDR_FRONT not in devices:
-        stop()
-        raise SystemExit
+    print(devices)
     print("all succ init")
       
     RR_sensor = VL53L0X(i2c, ADDR_LEFT)
@@ -216,58 +204,67 @@ set_forward()
 RR_sensor, forward_sensor, RF_sensor = init_sensors()
 from collections import deque
 
-#N_dist_avg = 5
-#RR_dists = deque([], N_dist_avg)
-#forward_dists = deque([], N_dist_avg)
-#RF_dists = deque([], N_dist_avg)
+N_dist_avg = 3
+RR_dists = deque([], N_dist_avg)
+forward_dists = deque([], N_dist_avg)
+RF_dists = deque([], N_dist_avg)
 
+BACK_SPEED = 0.4
+FRONT_FULL = 0.6
+FRONT_HALF = 0.4
 while True:
     try:
-        RR_distance = RR_sensor.read()
-        #RR_dists.append(RR_distance)
+        RR_read = RR_sensor.read()
+        RR_dists.append(RR_read)
+        RR_distance = sum(RR_dists)/N_dist_avg
         #sleep(0.15)
 
-        forward_disantce = forward_sensor.read()
-        #forward_dists.append(forward_disantce)
+        forward_read = forward_sensor.read()
+        forward_dists.append(forward_read)
+        forward_distance = sum(forward_dists)/N_dist_avg
         #sleep(0.15)
         #print(sum(RR_dists)/N_dist_avg, sum(forward_dists)/N_dist_avg)
         
-        RF_distance = RF_sensor.read()
-        #RF_dists.append(RF_distance)
+        RF_read = RF_sensor.read() - 25
+        RF_dists.append(RF_read)
+        RF_distance = sum(RF_dists)/N_dist_avg
         
-        print(RR_distance, forward_disantce, RF_distance)
+        print(RR_distance, RF_distance, forward_distance)
         
         right_distance = min(RR_distance, RF_distance)
         
-        P_sum = sum_power_func(forward_disantce)
-        P_diff = diff_power_func(right_distance)
+        if forward_distance < MIN_FRONT_DIST:
+            set_backward()
+            P_L, P_R = (BACK_SPEED + 0.1, BACK_SPEED)
         
-        P_L = (P_sum - P_diff)/2
-        P_R = (P_sum + P_diff)/2
-        print(P_sum, P_diff, P_L, P_R)
+        else:
+            set_forward()
+            
+            if right_distance < MIN_SIDE_DIST:
+                P_L, P_R = (FRONT_HALF, FRONT_FULL)
+            elif right_distance > MAX_SIDE_DIST:
+                P_L, P_R = (FRONT_FULL, FRONT_HALF)
+            else:
+                P_L, P_R = (FRONT_FULL, FRONT_FULL)
+                
         
         set_speed_fraction(P_L, P_R)
+        print(P_L, P_R)
         
-        #left_blocked = RR_distance < THRESHOLD_MM
-        #right_blocked = forward_disantce < THRESHOLD_MM
-        #if right_blocked and not left_blocked:
-        #    turn_left()
-
-        #elif left_blocked and not right_blocked:
-        #    turn_right()
-
-        #elif left_blocked and right_blocked:
-        #    stop()
-
-        #else:
-        #    forward()
-
-        sleep(0.2)
+        #P_forward = sum_power_func(forward_disantce)
+        #P_diff = diff_power_func(right_distance)
+        
+        #P_L = P_forward*(1+P_diff)/2
+        #P_R = P_forward*(1-P_diff)/2
+        #print(P_forward, P_diff, P_L, P_R)
+        
+        #set_speed_fraction(P_L, P_R)
+        
 
     except OSError as e:
         print(e)
         stop()
-        sleep(1)
+        #sleep(1)
 
     except KeyboardInterrupt:
         stop()
