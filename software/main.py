@@ -7,6 +7,7 @@ from machine import Pin, I2C, PWM   # tools for talking to pins, sensors, motors
 from time import sleep              # sleep(seconds) pauses the program
 from vl53l0x import VL53L0X         # the driver that reads the laser sensors
 from collections import deque       # deque: a list that automatically discards its oldest entries
+from math import atan2, cos, degrees  # NEW: trig used by the angle-aware steering
 
 
 # ================================================
@@ -322,7 +323,7 @@ def normalise_to_cruise(left_motor_speed_fraction, right_motor_speed_fraction):
 
 
 # --- Speed Constraints ------------------------------------------------------
-FORWARD_SPEED_FRACTION = 0.75      # Maximum speed (cruising speed)
+FORWARD_SPEED_FRACTION = 0.9      # Maximum speed (cruising speed)
 MIN_SPEED_FRACTION = 0.4           # Minimum speed fraction not to stall.
 # --- Rolling sensor avarages ------------------------------------------------
 AVG_binsize = 1         # Readings bin size: More readings -> smoother but slower
@@ -332,16 +333,114 @@ AVG_binsize = 1         # Readings bin size: More readings -> smoother but slowe
 RR_dists      = deque([], AVG_binsize)   # right-rear  sensor history
 RF_dists      = deque([], AVG_binsize)   # right-front sensor history
 FORWARD_dists = deque([], AVG_binsize)   # forward     sensor history
-# --- Distance Thresholds ------------------------------------------------------
-RIGHT_MIN_DISTANCE = 55         # Distance below which we consider the wall to be too close
-RIGHT_MAX_DISTANCE = 200        # Distance above which we consider the wall to be too far
-FRONT_MIN_DISTANCE = 100        # Distance below which we consider the wall to be too close
-FRONT_CRUISE_threshold = 200    # Distance at which we allow the robot to cruise
-# --- Specific Speeds ---------------------------------------------------------
+# --- Front clearance thresholds ---------------------------------------------
+FRONT_MIN_DISTANCE = 100        # Below this, stop and reverse.
+FRONT_CRUISE_threshold = 200    # Above this, allow full cruising speed.
+# --- Reverse behaviour ------------------------------------------------------
 REVERSE_SPEED_FRACTION = MIN_SPEED_FRACTION
-REVERSE_DURATION = 1          												# Duration to reverse when too close to the front wall (in seconds)
-# --- Steering ---------------------------------------------------------
-STEERING_GAIN = 0.5               # Gain for steering adjustments based on wall distance error (goes from 1>)
+REVERSE_DURATION = 1            # Duration to reverse when too close to the front wall (in seconds)
+
+# --- Wall-following geometry + control gains --------------------------------
+# These three feed the NEW angle-aware steering (see wall_follow_steer()).
+SENSOR_SPACING_MM = 100         # <-- MEASURE THIS. Longitudinal gap between the
+                                #     RF and RR sensors along the robot body, in
+                                #     mm. The angle estimate is only as good as
+                                #     this number, so measure it on the real bot.
+RIGHT_TARGET_DISTANCE = 120     # The wall distance we want to HOLD (mm).
+DIST_GAIN  = 0.01              # Steering produced per mm of distance error.  (tune)
+ANGLE_GAIN = 0.9                # Steering produced per radian of heading error. (tune)
+STEER_LIMIT = 0.6               # Max steering authority, 0..1 (keeps a wheel from
+                                # being told to reverse or to over-spin).
+
+
+# ================================================
+# WALL-FOLLOWING GEOMETRY + STEERING  (NEW)
+# ================================================
+#
+# We follow a wall on the robot's RIGHT using the two right-side sensors:
+#   RF = right-FRONT  (call it d_front)
+#   RR = right-REAR   (call it d_rear)
+#
+# ASSUMPTION: both right sensors point straight out, perpendicular to the body,
+# and sit SENSOR_SPACING_MM apart along the body. If yours are splayed at an
+# angle instead, the tan() formula below needs adjusting for that offset.
+#
+#        front of robot
+#            ^
+#            |                 wall  ─────────────────────
+#         [RF] ─ ─ ─ ─ ─ ─ ─ ─ ─►   d_front
+#            |
+#            |  SENSOR_SPACING_MM
+#            |
+#         [RR] ─ ─ ─ ─ ─ ─ ─ ─ ─►   d_rear
+#            |
+#
+# If the robot runs perfectly parallel to the wall, d_front == d_rear. If the
+# nose drifts away from the wall, d_front > d_rear (and vice-versa). That
+# difference, divided by the known spacing, is the tangent of the heading
+# angle to the wall — the piece of information the old min()-based code could
+# not see, and the reason it could only react to distance, never to attitude.
+
+
+def wall_geometry(d_front, d_rear, spacing):
+    """Turn the two right-side readings into (perpendicular distance, angle).
+
+    Returns:
+        perp_distance : the true straight-line distance from the robot to the
+                        wall (mm), corrected for the robot's heading.
+        angle         : robot heading relative to the wall, in RADIANS.
+                          angle > 0  ->  nose pointing AWAY from the wall
+                          angle < 0  ->  nose pointing TOWARD the wall
+                          angle = 0  ->  travelling parallel to the wall
+
+    Maths (two parallel beams, 'spacing' mm apart along the body):
+            tan(angle)    = (d_front - d_rear) / spacing
+            perp_distance = cos(angle) * (d_front + d_rear) / 2
+    The cos() factor removes the slant: a slanted robot reads a longer beam
+    than its true perpendicular distance, and cos(angle) corrects for it.
+    """
+    angle = atan2(d_front - d_rear, spacing)
+    perp_distance = cos(angle) * (d_front + d_rear) / 2.0
+    return perp_distance, angle
+
+
+def wall_follow_steer(d_front, d_rear, base_speed):
+    """Steer to hold a FIXED wall distance while staying parallel to the wall.
+
+    This is a small PD-style controller acting on two errors at once:
+      * distance_error : how far we are from the target distance  -> the 'P' term
+      * angle          : our heading relative to the wall         -> the 'D' / damping term
+
+    Combined steering signal (POSITIVE => steer TOWARD the wall, i.e. to the right):
+
+        steer = DIST_GAIN * distance_error  +  ANGLE_GAIN * angle
+
+    Why the angle term is the whole point:
+      Suppose we are too far out, so the distance term tells us to cut back
+      toward the wall. As the robot turns in, its nose now points at the wall,
+      so 'angle' goes negative and SUBTRACTS from steer. That straightens the
+      robot out *before* it reaches the target distance, so it settles running
+      parallel instead of weaving in-and-out forever. The old three-branch
+      if/elif/else had no notion of heading, so it could only ever overshoot
+      and oscillate.
+
+    Returns (S_L, S_R, perp_distance, angle); the last two are handy for debug.
+    """
+    perp_distance, angle = wall_geometry(d_front, d_rear, SENSOR_SPACING_MM)
+
+    # Positive when we are TOO FAR from the wall and need to move closer.
+    distance_error = perp_distance - RIGHT_TARGET_DISTANCE
+
+    # One combined correction, then clamp so a wheel is never told to reverse.
+    steer = DIST_GAIN * distance_error + ANGLE_GAIN * angle
+    steer = max(-STEER_LIMIT, min(steer, STEER_LIMIT))
+
+    # Steering toward the wall (right) = LEFT wheel faster, RIGHT wheel slower.
+    # This matches the wheel convention used by set_right() elsewhere in the file.
+    S_L = base_speed * (1 + steer)
+    S_R = base_speed * (1 - steer)
+    return S_L, S_R, perp_distance, angle
+
 
 # ================================================
 # CONTROL LOGIC
@@ -380,20 +479,18 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
 
         print(f"Rolling distances (RR, RF, FORWARD): {RR_distance}, {RF_distance}, {FORWARD_distance}")
 
-        # --- 2. Combine the two right-side readings into one "wall distance" ----------------
-        RIGHT_distance = min(RR_distance, RF_distance)
-
-       # --- 3. Determine the appropriate control action based on sensor readings ----------------
+        # --- 2. Decide what to do based on the FORWARD clearance ----------------
         if FORWARD_distance < FRONT_MIN_DISTANCE:
+            # Wall dead ahead: stop, back off briefly, then re-assess next loop.
             set_stop()
             set_backward()
-            set_speed_fraction(REVERSE_SPEED_FRACTION, REVERSE_SPEED_FRACTION)
+            set_speed_fraction(REVERSE_SPEED_FRACTION*1.1, REVERSE_SPEED_FRACTION) # 
             sleep(REVERSE_DURATION)  # Reverse for a short duration before reassessing
             set_stop()  # Stop after reversing
         else:
             set_forward()
 
-            # --- 3a. Base forward speed from the FORWARD clearance ----------------------
+            # --- 2a. Base forward speed from the FORWARD clearance ----------------------
             if FORWARD_distance >= FRONT_CRUISE_threshold:
                 # Open road ahead: cruise at full speed.
                 base_speed = FORWARD_SPEED_FRACTION
@@ -404,28 +501,19 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
                 progress = (FORWARD_distance - FRONT_MIN_DISTANCE) / span   # 0.0 .. 1.0
                 base_speed = MIN_SPEED_FRACTION + progress * (FORWARD_SPEED_FRACTION - MIN_SPEED_FRACTION)
 
-            # --- 3b. Steering correction layered on top of base_speed -------------------
-            if RIGHT_distance < RIGHT_MIN_DISTANCE:        # too close to the wall -> veer left
-                error = RIGHT_MIN_DISTANCE - RIGHT_distance
-                relative_error = (error / RIGHT_distance) * STEERING_GAIN
-                S_L = base_speed * (1 - relative_error)
-                S_R = base_speed * (1 + relative_error)
-                print('1')
-            elif RIGHT_distance > RIGHT_MAX_DISTANCE:      # too far from the wall -> veer right
-                error = RIGHT_distance - RIGHT_MAX_DISTANCE
-                relative_error = (error / RIGHT_distance) * STEERING_GAIN
-                S_L = base_speed * (1 + relative_error)
-                S_R = base_speed * (1 - relative_error)
-                print('2')
-            else:                                          # wall distance within band -> go straight
-                S_L = base_speed
-                S_R = base_speed
-                print('3')
+            # --- 2b. Angle-aware wall following (replaces the old if/elif/else) ---------
+            # Feed the RIGHT-FRONT reading as d_front and RIGHT-REAR as d_rear.
+            # The controller estimates both our distance AND our heading to the
+            # wall, then returns left/right wheel speeds that hold the target
+            # distance while keeping us parallel.
+            S_L, S_R, wall_dist, wall_angle = wall_follow_steer(
+                RF_distance, RR_distance, base_speed)
 
             S_Ln, S_Rn = normalise_to_cruise(S_L, S_R)
-            print(f"S_L={S_L}, S_R={S_R} -> Normalised: S_Ln={S_Ln}, S_Rn={S_Rn}\n")
+            print(f"wall_dist={wall_dist:.0f}mm  angle={degrees(wall_angle):.1f}deg  "
+                  f"S_L={S_L:.2f} S_R={S_R:.2f} -> S_Ln={S_Ln:.2f} S_Rn={S_Rn:.2f}\n")
             set_speed_fraction(S_Ln, S_Rn)
-            sleep(1)
+            #sleep(1)
 
 
 
@@ -439,5 +527,3 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
         # Ctrl-C pressed: stop the wheels and exit the loop cleanly.
         set_stop()
         break
-
-
