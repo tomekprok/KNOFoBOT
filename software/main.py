@@ -323,8 +323,8 @@ def normalise_to_cruise(left_motor_speed_fraction, right_motor_speed_fraction):
 
 
 # --- Speed Constraints ------------------------------------------------------
-FORWARD_SPEED_FRACTION = 0.9      # Maximum speed (cruising speed)
-MIN_SPEED_FRACTION = 0.4           # Minimum speed fraction not to stall.
+FORWARD_SPEED_FRACTION = 0.7      # Maximum speed (cruising speed)
+MIN_SPEED_FRACTION = 0.3           # Minimum speed fraction not to stall.
 # --- Rolling sensor avarages ------------------------------------------------
 AVG_binsize = 1         # Readings bin size: More readings -> smoother but slower
                         # Theoretical max is 30 Hz, but at i2c running at 10 kHz (good for reliability)
@@ -335,20 +335,20 @@ RF_dists      = deque([], AVG_binsize)   # right-front sensor history
 FORWARD_dists = deque([], AVG_binsize)   # forward     sensor history
 # --- Front clearance thresholds ---------------------------------------------
 FRONT_MIN_DISTANCE = 100        # Below this, stop and reverse.
-FRONT_CRUISE_threshold = 200    # Above this, allow full cruising speed.
+FRONT_CRUISE_threshold = 300    # Above this, allow full cruising speed.
 # --- Reverse behaviour ------------------------------------------------------
 REVERSE_SPEED_FRACTION = MIN_SPEED_FRACTION
 REVERSE_DURATION = 1            # Duration to reverse when too close to the front wall (in seconds)
 
 # --- Wall-following geometry + control gains --------------------------------
 # These three feed the NEW angle-aware steering (see wall_follow_steer()).
-SENSOR_SPACING_MM = 100         # <-- MEASURE THIS. Longitudinal gap between the
+SENSOR_SPACING_MM = 125         # <-- MEASURE THIS. Longitudinal gap between the
                                 #     RF and RR sensors along the robot body, in
                                 #     mm. The angle estimate is only as good as
                                 #     this number, so measure it on the real bot.
-RIGHT_TARGET_DISTANCE = 120     # The wall distance we want to HOLD (mm).
+RIGHT_TARGET_DISTANCE = 100     # The wall distance we want to HOLD (mm).
 DIST_GAIN  = 0.01              # Steering produced per mm of distance error.  (tune)
-ANGLE_GAIN = 0.9                # Steering produced per radian of heading error. (tune)
+ANGLE_GAIN = 0.6                # Steering produced per radian of heading error. (tune)
 STEER_LIMIT = 0.6               # Max steering authority, 0..1 (keeps a wheel from
                                 # being told to reverse or to over-spin).
 
@@ -527,3 +527,4 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
         # Ctrl-C pressed: stop the wheels and exit the loop cleanly.
         set_stop()
         break
+
