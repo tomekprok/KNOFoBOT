@@ -183,6 +183,7 @@ def counts_to_mm(counts):   #TODO: Add a translation function/table
         return max(min_value, min(value, max_value))
     return clamp(counts, 30, 500)  
 
+
 # ================================================
 # MOTORS (via the L298N driver chip)
 # ================================================
@@ -207,7 +208,7 @@ enb.freq(1000)
 
 # The maximum value duty_u16() accepts (see idea 2: 0 = off, 65535 = full on).
 # Giving it a name prevents accidentally exceeding the hardware limit.
-PWM_MAX = 65535
+PWM_MAX = 65535 #65535
 
 
 def set_forward():
@@ -321,10 +322,10 @@ def normalise_to_cruise(left_motor_speed_fraction, right_motor_speed_fraction):
 
 
 # --- Speed Constraints ------------------------------------------------------
-FORWARD_SPEED_FRACTION = 0.75      # Maximum speed (cruising speed)
-MIN_SPEED_FRACTION = 0.1           # Minimum speed fraction not to stall.
+FORWARD_SPEED_FRACTION = 0.7      # Maximum speed (cruising speed)
+MIN_SPEED_FRACTION = 0.4           # Minimum speed fraction not to stall.
 # --- Rolling sensor avarages ------------------------------------------------
-AVG_binsize = 2         # Readings bin size: More readings -> smoother but slower
+AVG_binsize = 1         # Readings bin size: More readings -> smoother but slower
                         # Theoretical max is 30 Hz, but at i2c running at 10 kHz (good for reliability)
                         # it drops to ~8 Hz, with 3 sensors read sequentially, we get ~3Hz               XXX I am not 100% sure about that.
                         # AVG_binsize further divides the effective update rate.
@@ -332,15 +333,15 @@ RR_dists      = deque([], AVG_binsize)   # right-rear  sensor history
 RF_dists      = deque([], AVG_binsize)   # right-front sensor history
 FORWARD_dists = deque([], AVG_binsize)   # forward     sensor history
 # --- Distance Thresholds ------------------------------------------------------
-RIGHT_MIN_DISTANCE = 80         # Distance below which we consider the wall to be too close
+RIGHT_MIN_DISTANCE = 55         # Distance below which we consider the wall to be too close
 RIGHT_MAX_DISTANCE = 200        # Distance above which we consider the wall to be too far
 FRONT_MIN_DISTANCE = 100        # Distance below which we consider the wall to be too close
 FRONT_CRUISE_threshold = 200    # Distance at which we allow the robot to cruise
 # --- Specific Speeds ---------------------------------------------------------
-REVERSE_SPEED_FRACTION = 0.5    # Speed fraction for reversing
-REVERSE_DURATION = 1          # Duration to reverse when too close to the front wall (in seconds)
+REVERSE_SPEED_FRACTION = MIN_SPEED_FRACTION
+REVERSE_DURATION = 1          												# Duration to reverse when too close to the front wall (in seconds)
 # --- Steering ---------------------------------------------------------
-STEERING_GAIN = 1               # Gain for steering adjustments based on wall distance error (goes from 1>)
+STEERING_GAIN = 0.5               # Gain for steering adjustments based on wall distance error (goes from 1>)
 
 # ================================================
 # CONTROL LOGIC
@@ -354,13 +355,12 @@ RR_sensor, FORWARD_sensor, RF_sensor = init_sensors()   # Initialise the sensors
 
 
 set_forward()      # start moving forward immediately; we will adjust speed and direction as we go
-set_speed_fraction(0.5, 0.5)
+set_speed_fraction(MIN_SPEED_FRACTION, MIN_SPEED_FRACTION)
 sleep(1)
 set_backward()     # start moving backward immediately; we will adjust speed and direction as we go
-set_speed_fraction(0.5, 0.5)
+set_speed_fraction(MIN_SPEED_FRACTION, MIN_SPEED_FRACTION)
 sleep(1)
 set_stop()         # stop before entering the main loop
-sleep(1)
 
 
 while True:   # repeat forever (Ctrl-C to exit cleanly)
@@ -383,33 +383,50 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
         # --- 2. Combine the two right-side readings into one "wall distance" ----------------
         RIGHT_distance = min(RR_distance, RF_distance)
 
-        # --- 3. Determine the appropriate control action based on sensor readings ----------------
-        if FORWARD_distance < FRONT_MIN_DISTANCE: 
+       # --- 3. Determine the appropriate control action based on sensor readings ----------------
+        if FORWARD_distance < FRONT_MIN_DISTANCE:
             set_stop()
             set_backward()
             set_speed_fraction(REVERSE_SPEED_FRACTION, REVERSE_SPEED_FRACTION)
             sleep(REVERSE_DURATION)  # Reverse for a short duration before reassessing
-            set_stop()
+            set_stop()  # Stop after reversing
         else:
             set_forward()
-            if RIGHT_distance < RIGHT_MIN_DISTANCE: # veer left
-                error = RIGHT_MIN_DISTANCE - RIGHT_distance
-                relative_error = error / RIGHT_distance #TODO: Add gain to relativce error
-                S_R = FORWARD_SPEED_FRACTION * (1 + relative_error)
-                S_L = FORWARD_SPEED_FRACTION * (1 - relative_error)/2
-                S_Ln, S_Rn = normalise_to_cruise(S_L, S_R)
-                set_speed_fraction(S_Ln, S_Rn)
-            elif RIGHT_distance > RIGHT_MAX_DISTANCE:
-                # Too far from the right wall: veer right
-                error = RIGHT_distance - RIGHT_MAX_DISTANCE
-                relative_error = error / RIGHT_distance #TODO: Add gain to relativce error
-                S_R = FORWARD_SPEED_FRACTION * (1 - relative_error)/2
-                S_L = FORWARD_SPEED_FRACTION * (1 + relative_error)/2
-                S_Ln, S_Rn = normalise_to_cruise(S_L, S_R)
-                set_speed_fraction(S_Ln, S_Rn)
+
+            # --- 3a. Base forward speed from the FORWARD clearance ----------------------
+            if FORWARD_distance >= FRONT_CRUISE_threshold:
+                # Open road ahead: cruise at full speed.
+                base_speed = FORWARD_SPEED_FRACTION
             else:
-                # Within acceptable range: go straight
-                set_speed_fraction(FORWARD_SPEED_FRACTION, FORWARD_SPEED_FRACTION)
+                # Between FRONT_MIN_DISTANCE and FRONT_CRUISE_threshold:
+                # ramp speed linearly from MIN_SPEED_FRACTION up to FORWARD_SPEED_FRACTION.
+                span = FRONT_CRUISE_threshold - FRONT_MIN_DISTANCE
+                progress = (FORWARD_distance - FRONT_MIN_DISTANCE) / span   # 0.0 .. 1.0
+                base_speed = MIN_SPEED_FRACTION + progress * (FORWARD_SPEED_FRACTION - MIN_SPEED_FRACTION)
+
+            # --- 3b. Steering correction layered on top of base_speed -------------------
+            if RIGHT_distance < RIGHT_MIN_DISTANCE:        # too close to the wall -> veer left
+                error = RIGHT_MIN_DISTANCE - RIGHT_distance
+                relative_error = (error / RIGHT_distance) * STEERING_GAIN
+                S_L = base_speed * (1 - relative_error)
+                S_R = base_speed * (1 + relative_error)
+                print('1')
+            elif RIGHT_distance > RIGHT_MAX_DISTANCE:      # too far from the wall -> veer right
+                error = RIGHT_distance - RIGHT_MAX_DISTANCE
+                relative_error = (error / RIGHT_distance) * STEERING_GAIN
+                S_L = base_speed * (1 + relative_error)
+                S_R = base_speed * (1 - relative_error)
+                print('2')
+            else:                                          # wall distance within band -> go straight
+                S_L = base_speed
+                S_R = base_speed
+                print('3')
+
+            S_Ln, S_Rn = normalise_to_cruise(S_L, S_R)
+            print(f"S_L={S_L}, S_R={S_R} -> Normalised: S_Ln={S_Ln}, S_Rn={S_Rn}\n")
+            set_speed_fraction(S_Ln, S_Rn)
+            sleep(1)
+
 
 
     except OSError as e:
@@ -422,3 +439,5 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
         # Ctrl-C pressed: stop the wheels and exit the loop cleanly.
         set_stop()
         break
+
+
