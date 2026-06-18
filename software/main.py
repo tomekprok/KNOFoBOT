@@ -30,9 +30,9 @@ i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=10000)
 # factory sharing the SAME I2C address (0x29). If more than one is awake at
 # the same time before we rename them, the Pico cannot tell them apart and the
 # bus jams. The solution is to wake and rename them ONE AT A TIME.
-xshut_RR  = Pin(12, Pin.OUT)        # XSHUT for the RIGHT-REAR  sensor (RR)
-xshut_RF = Pin(13, Pin.OUT)         # XSHUT for the RIGHT-FRONT sensor (RF)
-xshut_FORWARD = Pin(11, Pin.OUT)    # XSHUT for the FORWARD     sensor
+xshut_RR  = Pin(11, Pin.OUT)        # XSHUT for the RIGHT-REAR  sensor (RR)
+xshut_RF = Pin(12, Pin.OUT)         # XSHUT for the RIGHT-FRONT sensor (RF)
+xshut_FORWARD = Pin(13, Pin.OUT)    # XSHUT for the FORWARD     sensor
 
 
 # --- Sensor I2C addresses ---------------------------------------------------
@@ -41,8 +41,8 @@ xshut_FORWARD = Pin(11, Pin.OUT)    # XSHUT for the FORWARD     sensor
 # reassign them during start-up (see init_sensors()).
 DEFAULT    = 0x29 
 ADDR_RR  = 0x30
-ADDR_RF = 0x31 
-ADDR_FORWARD = 0x32  
+ADDR_RF = 0x32 
+ADDR_FORWARD = 0x31  
 
 # NOTE: Sensor readings are accessed via `RR_sensor.read()` etc.
 
@@ -157,14 +157,14 @@ def init_sensors():
     # 5) Create the three Python objects we will use to read distances.
 
     RR_sensor      = VL53L0X(i2c, ADDR_RR)
-    FORWARD_sensor = VL53L0X(i2c, ADDR_RF)
-    RF_sensor      = VL53L0X(i2c, ADDR_FORWARD)
+    FORWARD_sensor = VL53L0X(i2c, ADDR_FORWARD)
+    RF_sensor      = VL53L0X(i2c, ADDR_RF)
 
     # Make sure each software object also carries the correct address internally
     # (see set_sensor_address() above for why this is needed).
-    set_sensor_address(RF_sensor,      ADDR_FORWARD)
+    set_sensor_address(RF_sensor,      ADDR_RF)
     set_sensor_address(RR_sensor,      ADDR_RR)
-    set_sensor_address(FORWARD_sensor, ADDR_RF)
+    set_sensor_address(FORWARD_sensor, ADDR_FORWARD)
 
     sleep(0.1)
 
@@ -322,7 +322,7 @@ def normalise_to_cruise(left_motor_speed_fraction, right_motor_speed_fraction):
 
 
 # --- Speed Constraints ------------------------------------------------------
-FORWARD_SPEED_FRACTION = 0.7      # Maximum speed (cruising speed)
+FORWARD_SPEED_FRACTION = 0.75      # Maximum speed (cruising speed)
 MIN_SPEED_FRACTION = 0.4           # Minimum speed fraction not to stall.
 # --- Rolling sensor avarages ------------------------------------------------
 AVG_binsize = 1         # Readings bin size: More readings -> smoother but slower
