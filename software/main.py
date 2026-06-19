@@ -21,7 +21,7 @@ from math import atan2, cos, degrees  # NEW: trig used by the angle-aware steeri
 # Here we say: use I2C unit 0, with SDA on GP0 and SCL on GP1.
 # `freq` is how fast the chatter runs. 10 000 Hz (10 kHz) is deliberately slow
 # but very reliable, which is useful on a breadboard with imperfect connections.
-i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=10000)
+i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=1000000)
 
 # --- The sensors' on/off switches (XSHUT) -----------------------------------
 # Each VL53L0X laser sensor has a "shutdown" pin called XSHUT.
@@ -323,8 +323,8 @@ def normalise_to_cruise(left_motor_speed_fraction, right_motor_speed_fraction):
 
 
 # --- Speed Constraints ------------------------------------------------------
-FORWARD_SPEED_FRACTION = 0.7      # Maximum speed (cruising speed)
-MIN_SPEED_FRACTION = 0.3           # Minimum speed fraction not to stall.
+FORWARD_SPEED_FRACTION = 0.9      # Maximum speed (cruising speed)
+MIN_SPEED_FRACTION = 0.4           # Minimum speed fraction not to stall.
 # --- Rolling sensor avarages ------------------------------------------------
 AVG_binsize = 1         # Readings bin size: More readings -> smoother but slower
                         # Theoretical max is 30 Hz, but at i2c running at 10 kHz (good for reliability)
@@ -346,10 +346,12 @@ SENSOR_SPACING_MM = 125         # <-- MEASURE THIS. Longitudinal gap between the
                                 #     RF and RR sensors along the robot body, in
                                 #     mm. The angle estimate is only as good as
                                 #     this number, so measure it on the real bot.
-RIGHT_TARGET_DISTANCE = 100     # The wall distance we want to HOLD (mm).
-DIST_GAIN  = 0.01              # Steering produced per mm of distance error.  (tune)
-ANGLE_GAIN = 0.6                # Steering produced per radian of heading error. (tune)
-STEER_LIMIT = 0.6               # Max steering authority, 0..1 (keeps a wheel from
+RIGHT_TARGET_DISTANCE = 84     # The wall distance we want to HOLD (mm).
+DIST_GAIN  = 0.010              # Steering produced per mm of distance error.  (tune)
+DIST_KI = 0.00001
+N_KI = 200
+ANGLE_GAIN = 0.85                # Steering produced per radian of heading error. (tune)
+STEER_LIMIT = 0.65               # Max steering authority, 0..1 (keeps a wheel from
                                 # being told to reverse or to over-spin).
 
 
@@ -400,11 +402,11 @@ def wall_geometry(d_front, d_rear, spacing):
     than its true perpendicular distance, and cos(angle) corrects for it.
     """
     angle = atan2(d_front - d_rear, spacing)
-    perp_distance = cos(angle) * (d_front + d_rear) / 2.0
+    perp_distance = cos(angle) * (d_front + d_rear)/2
     return perp_distance, angle
 
 
-def wall_follow_steer(d_front, d_rear, base_speed):
+def wall_follow_steer(d_front, d_rear, base_speed, dist_sum):
     """Steer to hold a FIXED wall distance while staying parallel to the wall.
 
     This is a small PD-style controller acting on two errors at once:
@@ -432,7 +434,8 @@ def wall_follow_steer(d_front, d_rear, base_speed):
     distance_error = perp_distance - RIGHT_TARGET_DISTANCE
 
     # One combined correction, then clamp so a wheel is never told to reverse.
-    steer = DIST_GAIN * distance_error + ANGLE_GAIN * angle
+    dist_sum = dist_sum + distance_error/N_KI
+    steer = DIST_GAIN * distance_error + ANGLE_GAIN * angle + dist_sum*DIST_KI
     steer = max(-STEER_LIMIT, min(steer, STEER_LIMIT))
 
     # Steering toward the wall (right) = LEFT wheel faster, RIGHT wheel slower.
@@ -461,6 +464,7 @@ set_speed_fraction(MIN_SPEED_FRACTION, MIN_SPEED_FRACTION)
 sleep(1)
 set_stop()         # stop before entering the main loop
 
+dist_sum = 0
 
 while True:   # repeat forever (Ctrl-C to exit cleanly)
     try:
@@ -471,7 +475,7 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
         RR_dists.append(counts_to_mm(RR_sensor.read()))
         RR_distance = sum(RR_dists) / AVG_binsize  
 
-        RF_dists.append(counts_to_mm(RF_sensor.read()))
+        RF_dists.append(counts_to_mm(RF_sensor.read()) - 8)
         RF_distance = sum(RF_dists) / AVG_binsize
 
         FORWARD_dists.append(counts_to_mm(FORWARD_sensor.read()))
@@ -484,7 +488,7 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
             # Wall dead ahead: stop, back off briefly, then re-assess next loop.
             set_stop()
             set_backward()
-            set_speed_fraction(REVERSE_SPEED_FRACTION*1.1, REVERSE_SPEED_FRACTION) # 
+            set_speed_fraction(REVERSE_SPEED_FRACTION*2, REVERSE_SPEED_FRACTION*0.5) # 
             sleep(REVERSE_DURATION)  # Reverse for a short duration before reassessing
             set_stop()  # Stop after reversing
         else:
@@ -507,15 +511,13 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
             # wall, then returns left/right wheel speeds that hold the target
             # distance while keeping us parallel.
             S_L, S_R, wall_dist, wall_angle = wall_follow_steer(
-                RF_distance, RR_distance, base_speed)
+                RF_distance, RR_distance, base_speed, dist_sum)
 
             S_Ln, S_Rn = normalise_to_cruise(S_L, S_R)
             print(f"wall_dist={wall_dist:.0f}mm  angle={degrees(wall_angle):.1f}deg  "
                   f"S_L={S_L:.2f} S_R={S_R:.2f} -> S_Ln={S_Ln:.2f} S_Rn={S_Rn:.2f}\n")
             set_speed_fraction(S_Ln, S_Rn)
             #sleep(1)
-
-
 
     except OSError as e:
         # A sensor read failed — typically a transient I2C hiccup on a
@@ -527,4 +529,5 @@ while True:   # repeat forever (Ctrl-C to exit cleanly)
         # Ctrl-C pressed: stop the wheels and exit the loop cleanly.
         set_stop()
         break
+
 
